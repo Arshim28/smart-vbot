@@ -269,10 +269,10 @@ def main():
             token = st.session_state.room_info["token"]
             daily_url = f"{room_url}?token={token}"
             
-            # Embed Daily iframe
+            # Embed Daily iframe - FIXED: changed width from "100%" to 800
             st.components.v1.iframe(
                 src=daily_url,
-                width="100%",
+                width=800,
                 height=400,
                 scrolling=False
             )

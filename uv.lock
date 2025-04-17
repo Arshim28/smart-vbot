@@ -2698,6 +2698,7 @@ name = "smart-voice-bot"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "loguru" },
     { name = "pipecat-ai", extra = ["cartesia", "daily", "deepgram", "elevenlabs", "google", "groq", "silero", "ultravox"] },
     { name = "python-dotenv" },
     { name = "streamlit" },
@@ -2707,6 +2708,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "loguru", specifier = ">=0.7.3" },
     { name = "pipecat-ai", extras = ["cartesia", "daily", "deepgram", "elevenlabs", "google", "groq", "silero", "ultravox"], specifier = ">=0.0.63" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "streamlit", specifier = ">=1.44.1" },

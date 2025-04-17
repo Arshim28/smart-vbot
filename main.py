@@ -36,7 +36,15 @@ logger.add(sys.stderr, level="INFO")
 
 class SuggestionProducer(ProducerProcessor):
     def __init__(self):
-        super().__init__()
+        # Define a proper async filter function
+        async def async_filter(frame: Frame) -> bool:
+            return True  # Accept all frames by default
+            
+        # Pass the async filter function to the parent constructor
+        super().__init__(
+            filter=async_filter,
+            passthrough=True
+        )
         self.suggestion_count = 0
     
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -59,13 +67,19 @@ class SuggestionProducer(ProducerProcessor):
 
 
 class FrameLogger(FrameProcessor):
-    def __init__(self, name: str):
+    def __init__(self, logger_name: str):
         super().__init__()
-        self.name = name
+        self._logger_name = logger_name
+        self._ready = True  # Mark as ready immediately
     
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        # Always call the parent's process_frame first
+        await super().process_frame(frame, direction)
+        
         if hasattr(frame, "text") and direction == FrameDirection.DOWNSTREAM:
-            logger.info(f"[{self.name}] {frame.text}")
+            logger.info(f"[{self._logger_name}] {frame.text}")
+            
+        # Pass the frame to the next processor
         await self.push_frame(frame)
 
 
@@ -114,10 +128,10 @@ async def create_voice_bot(session: aiohttp.ClientSession, room_url: str, token:
         )
     )
     
-    # Smart branch: Gemini-2.5 Pro for deeper analysis
+    # Smart branch: Gemini-2.0-flash for deeper analysis
     gemini_llm = GoogleLLMService(
         api_key=os.getenv("GOOGLE_API_KEY"),
-        model="gemini-1.5-pro",
+        model="gemini-2.0-flash",  # Updated to gemini-2.0-flash as requested
         system_instruction="""
         You are an AI assistant specializing in detailed analysis and higher-level suggestions.
         Provide thoughtful, insightful responses that begin with "Here's a suggestion: ".
@@ -138,11 +152,8 @@ async def create_voice_bot(session: aiohttp.ClientSession, room_url: str, token:
         {
             "role": "system",
             "content": system_instruction
-        },
-        {
-            "role": "assistant", 
-            "content": "Hello! I'm your voice assistant. How can I help you today?"
         }
+        # No need for initial assistant message, will be generated at first interaction
     ])
     
     # Create separate Google context for Gemini branch with search capability
@@ -155,13 +166,10 @@ async def create_voice_bot(session: aiohttp.ClientSession, room_url: str, token:
         }
     }
     
+    # Create an initial message using the proper Content format for Gemini
     gemini_context_obj = GoogleLLMContext(
-        messages=[
-            {
-                "role": "assistant", 
-                "content": "Hello! I'm your voice assistant. How can I help you today?"
-            }
-        ],
+        # Use empty messages to start - the system instruction will be used instead
+        messages=[],
         tools=[search_tool]
     )
     
