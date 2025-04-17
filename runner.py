@@ -16,14 +16,7 @@ DEFAULT_TOKEN_EXPIRY = 60 * 60  # 1 hour
 
 
 async def configure(session: aiohttp.ClientSession) -> Tuple[str, str]:
-    """Get or create a Daily room URL and token.
-    
-    Args:
-        session: Active aiohttp client session
-        
-    Returns:
-        Tuple of (room_url, token)
-    """
+    """Get or create a Daily room URL and token."""
     parser = argparse.ArgumentParser(description="Smart Voice Bot")
     parser.add_argument("-u", "--url", type=str, help="Daily room URL")
     parser.add_argument("-k", "--apikey", type=str, help="Daily API key")
@@ -76,15 +69,7 @@ async def configure(session: aiohttp.ClientSession) -> Tuple[str, str]:
 
 
 async def create_room_with_token(session: aiohttp.ClientSession, params: Optional[DailyRoomParams] = None) -> Tuple[str, str]:
-    """Create a new Daily room and token.
-    
-    Args:
-        session: Active aiohttp client session
-        params: Optional room parameters
-        
-    Returns:
-        Tuple of (room_url, token)
-    """
+    """Create a new Daily room and token."""
     api_key = os.getenv("DAILY_API_KEY")
     if not api_key:
         raise ValueError("DAILY_API_KEY environment variable is required")

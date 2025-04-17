@@ -1936,6 +1936,9 @@ google = [
 groq = [
     { name = "groq" },
 ]
+openai = [
+    { name = "websockets" },
+]
 silero = [
     { name = "onnxruntime" },
 ]
@@ -2699,7 +2702,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "loguru" },
-    { name = "pipecat-ai", extra = ["cartesia", "daily", "deepgram", "elevenlabs", "google", "groq", "silero", "ultravox"] },
+    { name = "pipecat-ai", extra = ["cartesia", "daily", "deepgram", "elevenlabs", "google", "groq", "openai", "silero", "ultravox"] },
     { name = "python-dotenv" },
     { name = "streamlit" },
     { name = "websocket" },
@@ -2709,7 +2712,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
-    { name = "pipecat-ai", extras = ["cartesia", "daily", "deepgram", "elevenlabs", "google", "groq", "silero", "ultravox"], specifier = ">=0.0.63" },
+    { name = "pipecat-ai", extras = ["cartesia", "daily", "deepgram", "elevenlabs", "google", "groq", "openai", "silero", "ultravox"], specifier = ">=0.0.63" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "streamlit", specifier = ">=1.44.1" },
     { name = "websocket", specifier = ">=0.2.1" },

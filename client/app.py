@@ -115,7 +115,6 @@ class CaptionManager:
         if self.ws:
             self.ws.close()
             
-        # Define callbacks
         def on_message(ws, message):
             data = json.loads(message)
             if data.get("type") == "connection_established":
@@ -129,7 +128,7 @@ class CaptionManager:
             # Add to captions
             self.captions.append(data)
             
-            # Update the UI to show the new caption
+            # Update the UI
             st.session_state.update_captions = True
         
         def on_error(ws, error):
@@ -269,7 +268,7 @@ def main():
             token = st.session_state.room_info["token"]
             daily_url = f"{room_url}?token={token}"
             
-            # Embed Daily iframe - FIXED: changed width from "100%" to 800
+            # Embed Daily iframe
             st.components.v1.iframe(
                 src=daily_url,
                 width=800,

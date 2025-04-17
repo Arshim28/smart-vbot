@@ -1,8 +1,6 @@
 import asyncio
 import os
 import sys
-from pathlib import Path
-from typing import Dict, Any
 
 import aiohttp
 from loguru import logger
@@ -20,75 +18,57 @@ from pipecat.processors.producer_processor import ProducerProcessor
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIProcessor
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.google.llm import GoogleLLMService, GoogleLLMContext
+# Correct submodule import for Groq’s OpenAI‐compatible LLM adapter
+from pipecat.services.groq.llm import GroqLLMService
+from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.google.rtvi import GoogleRTVIObserver
-from pipecat.services.groq import GroqLLMService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 from pipecat.utils.text.markdown_text_filter import MarkdownTextFilter
-from pipecat.transcriptions.language import Language
 
 from runner import configure
 
-# Setup logging
-logger.remove(0)
+# 0) Logging
+logger.remove()
 logger.add(sys.stderr, level="INFO")
 
 
+# 1) Suggestion bridge (gemini → groq)
 class SuggestionProducer(ProducerProcessor):
     def __init__(self):
-        # Define a proper async filter function
-        async def async_filter(frame: Frame) -> bool:
-            return True  # Accept all frames by default
-            
-        # Pass the async filter function to the parent constructor
-        super().__init__(
-            filter=async_filter,
-            passthrough=True
-        )
-        self.suggestion_count = 0
-    
+        async def always(frame: Frame) -> bool:
+            return True
+        super().__init__(filter=always, passthrough=True)
+        self.count = 0
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        
-        if hasattr(frame, "text") and direction == FrameDirection.DOWNSTREAM:
-            # Only produce frames from Gemini branch that contain higher-level suggestions
-            if frame.metadata.get("source") == "gemini" and "here's a suggestion:" in frame.text.lower():
-                self.suggestion_count += 1
-                logger.info(f"Producing suggestion {self.suggestion_count}: {frame.text}")
-                
-                # Add metadata to indicate this is a suggestion from Gemini
-                frame.metadata["suggestion"] = True
-                frame.metadata["suggestion_id"] = self.suggestion_count
-                
-                # Share this frame with the consumer in the fast branch
+        text = getattr(frame, "text", "")
+        if direction == FrameDirection.DOWNSTREAM and frame.metadata.get("source") == "gemini":
+            if "here's a suggestion:" in text.lower():
+                self.count += 1
+                logger.info(f"Producing suggestion {self.count}: {text}")
+                frame.metadata.update(suggestion=True, suggestion_id=self.count)
                 await self.produce(frame)
-        
         await self.push_frame(frame)
 
 
+# 2) Simple frame logger
 class FrameLogger(FrameProcessor):
-    def __init__(self, logger_name: str):
+    def __init__(self, name: str):
         super().__init__()
-        self._logger_name = logger_name
-        self._ready = True  # Mark as ready immediately
-    
+        self.name = name
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        # Always call the parent's process_frame first
         await super().process_frame(frame, direction)
-        
         if hasattr(frame, "text") and direction == FrameDirection.DOWNSTREAM:
-            logger.info(f"[{self._logger_name}] {frame.text}")
-            
-        # Pass the frame to the next processor
+            logger.info(f"[{self.name}] {frame.text}")
         await self.push_frame(frame)
 
 
 async def create_voice_bot(session: aiohttp.ClientSession, room_url: str, token: str):
-    # Create Daily transport
+    # — Transport, STT, RTVI —
     transport = DailyTransport(
-        room_url,
-        token,
-        "Smart Voice Bot",
+        room_url, token, "Smart Voice Bot",
         DailyParams(
             audio_out_enabled=True,
             vad_enabled=True,
@@ -96,163 +76,126 @@ async def create_voice_bot(session: aiohttp.ClientSession, room_url: str, token:
             vad_audio_passthrough=True,
         ),
     )
-    
-    # Create shared STT service (used by both branches)
-    deepgram_stt = DeepgramSTTService(
+    stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         model="nova-2",
         interim_results=False,
         endpointing=500,
     )
-    
-    # Create RTVI processor for client UI events
-    rtvi_processor = RTVIProcessor(config=RTVIConfig(config=[]))
-    
-    # Create system instructions
-    system_instruction = """
-    You are a helpful AI assistant that provides concise responses.
-    Format your responses for natural speech without special characters or complex formatting.
-    Do not mention that your responses will be converted to audio.
-    """
-    
-    # Create the LLM services for each branch
-    
-    # Fast branch: Groq's Llama-3/70B for quick responses (<150ms)
+    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+
+    # Shared system prompt
+    system_instruction = (
+        "You are a helpful AI assistant that provides concise, speech‑friendly responses. "
+        "Do not mention that your responses will be converted to audio."
+    )
+
+    # — Groq branch (fast) —
     groq_llm = GroqLLMService(
         api_key=os.getenv("GROQ_API_KEY"),
         model="llama-3.3-70b-versatile",
-        params=GroqLLMService.InputParams(
-            temperature=0.5,
-            max_tokens=800,  # Shorter responses for quick replies
-            system=system_instruction
-        )
+        temperature=0.5,
+        max_tokens=800,
+        system_instruction=system_instruction,
     )
-    
-    # Smart branch: Gemini-2.0-flash for deeper analysis
-    gemini_llm = GoogleLLMService(
+    # Start with an empty OpenAI‑style context; adapter will prepend the system message.
+    groq_ctx = OpenAILLMContext(messages=[])
+    groq_agg = groq_llm.create_context_aggregator(groq_ctx)
+
+    # — Gemini branch (deep) —
+    google_llm = GoogleLLMService(
         api_key=os.getenv("GOOGLE_API_KEY"),
-        model="gemini-2.0-flash",  # Updated to gemini-2.0-flash as requested
-        system_instruction="""
-        You are an AI assistant specializing in detailed analysis and higher-level suggestions.
-        Provide thoughtful, insightful responses that begin with "Here's a suggestion: ".
-        Your responses will be shared with another AI that handles quick replies, so focus on
-        providing additional context and deeper insights rather than answering directly.
-        """
+        model="gemini-2.0-flash",
+        system_instruction=(
+            "You are an AI assistant specializing in detailed analysis. "
+            "Begin suggestions with \"Here's a suggestion: \"."
+        ),
     )
-    
-    # Create TTS service (Cartesia)
-    cartesia_tts = CartesiaTTSService(
+    gem_ctx = OpenAILLMContext(messages=[])
+    gem_agg = google_llm.create_context_aggregator(gem_ctx)
+
+    # — TTS —
+    tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id=os.getenv("CARTESIA_VOICE_ID", "71a7ad14-091c-4e8e-a314-022ece01c121"),
         text_filters=[MarkdownTextFilter()],
     )
-    
-    # Create context for Groq branch (OpenAI compatible)
-    groq_context_obj = OpenAILLMContext([
-        {
-            "role": "system",
-            "content": system_instruction
-        }
-        # No need for initial assistant message, will be generated at first interaction
-    ])
-    
-    # Create separate Google context for Gemini branch with search capability
-    search_tool = {
-        "google_search_retrieval": {
-            "dynamic_retrieval_config": {
-                "mode": "MODE_DYNAMIC",
-                "dynamic_threshold": 0.6  # Only search when needed
-            }
-        }
-    }
-    
-    # Create an initial message using the proper Content format for Gemini
-    gemini_context_obj = GoogleLLMContext(
-        # Use empty messages to start - the system instruction will be used instead
-        messages=[],
-        tools=[search_tool]
-    )
-    
-    # Create context aggregators for each branch
-    groq_context = groq_llm.create_context_aggregator(groq_context_obj)
-    gemini_context = gemini_llm.create_context_aggregator(gemini_context_obj)
-    
-    # Create producer/consumer for cross-branch communication
-    suggestion_producer = SuggestionProducer()
-    suggestion_consumer = ConsumerProcessor(producer=suggestion_producer)
-    
-    # Create frame loggers for debugging
-    fast_logger = FrameLogger("Fast Branch")
-    smart_logger = FrameLogger("Smart Branch")
-    
-    # Build the parallel pipeline
+
+    # — Suggestion bridge & loggers —
+    producer = SuggestionProducer()
+    consumer = ConsumerProcessor(producer=producer)
+    fast_log = FrameLogger("Fast Branch")
+    smart_log = FrameLogger("Smart Branch")
+
+    # — Assemble pipeline —
     pipeline = Pipeline([
         transport.input(),
-        deepgram_stt,
-        rtvi_processor,
+        stt,
+        rtvi,
         ParallelPipeline(
-            # Fast branch: Quick responses with Groq
+            # Fast branch
             [
-                fast_logger,
-                groq_context.user(),
+                fast_log,
+                groq_agg.user(),
                 groq_llm,
-                suggestion_consumer,  # Receive suggestions from smart branch
-                cartesia_tts,
-                groq_context.assistant(),
+                consumer,
+                tts,
+                groq_agg.assistant(),
             ],
-            # Smart branch: Deeper analysis with Gemini
+            # Smart branch
             [
-                smart_logger,
-                gemini_context.user(),
-                gemini_llm,
-                suggestion_producer,  # Share suggestions with fast branch
-                gemini_context.assistant(),
-            ]
+                smart_log,
+                gem_agg.user(),
+                google_llm,
+                producer,
+                gem_agg.assistant(),
+            ],
         ),
         transport.output(),
     ])
-    
-    # Set up task with observers
-    observers = [GoogleRTVIObserver(rtvi_processor)]
-    
+
+    # — Task & observers —
+    observers = [GoogleRTVIObserver(rtvi)]
     task = PipelineTask(
         pipeline,
         params=PipelineParams(allow_interruptions=True),
         observers=observers,
     )
-    
-    # Set up event handlers
-    @rtvi_processor.event_handler("on_client_ready")
-    async def on_client_ready(rtvi):
-        await rtvi_processor.set_bot_ready()
-        
+
+    @rtvi.event_handler("on_client_ready")
+    async def on_client_ready(evt):
+        await rtvi.set_bot_ready()
+
     @transport.event_handler("on_first_participant_joined")
-    async def on_first_participant_joined(transport, participant):
+    async def on_first_participant_joined(trans, participant):
         logger.info(f"First participant joined: {participant}")
-        # Initialize both branches with their respective context frames
+        # Seed both contexts (system instructions are already set in the services)
         await task.queue_frames([
-            groq_context.user().get_context_frame(),
-            gemini_context.user().get_context_frame()
+            groq_agg.user().get_context_frame(),
+            gem_agg.user().get_context_frame(),
         ])
-        
+        logger.info("Pipeline ready for conversation")
+
     @transport.event_handler("on_participant_left")
-    async def on_participant_left(transport, participant, reason):
-        logger.info(f"Participant left: {participant}, reason: {reason}")
+    async def on_participant_left(trans, participant, reason):
+        logger.info(f"Participant left: {participant} (reason: {reason})")
         await task.cancel()
-    
-    # Run the pipeline
+
     runner = PipelineRunner()
-    await runner.run(task)
+    try:
+        await runner.run(task)
+    except Exception as e:
+        logger.error(f"Pipeline error: {e}")
 
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        # Get room URL and token
-        room_url, token = await configure(session)
-        logger.info(f"Room URL: {room_url}")
-        
-        # Start the voice bot
-        await create_voice_bot(session, room_url, token)
+        try:
+            room_url, token = await configure(session)
+            logger.info(f"Room URL: {room_url}")
+            await create_voice_bot(session, room_url, token)
+        except Exception as e:
+            logger.error(f"Error in main: {e}")
 
 
 if __name__ == "__main__":
