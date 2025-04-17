@@ -6,6 +6,14 @@ import time
 import aiohttp
 from loguru import logger
 
+# Optional: Configure pydub to use specific ffmpeg path if needed
+try:
+    from pydub import AudioSegment
+    # Uncomment and modify if ffmpeg is in a non-standard location
+    # AudioSegment.converter = "/path/to/ffmpeg"
+except ImportError:
+    logger.warning("pydub not found - audio processing may not work correctly")
+
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import Frame, TextFrame
 from pipecat.observers.base_observer import BaseObserver
@@ -198,6 +206,7 @@ async def create_voice_bot(session, room_url, token):
         api_key=os.getenv("CARTESIA_API_KEY"),
         voice_id=os.getenv("CARTESIA_VOICE_ID", "71a7ad14-091c-4e8e-a314-022ece01c121"),
         text_filters=[MarkdownTextFilter()],
+        streaming=True,  # Enable streaming for better real-time experience
     )
 
     # — Suggestion producer/consumer —
@@ -215,7 +224,8 @@ async def create_voice_bot(session, room_url, token):
     # — Frame loggers —
     main_log = FrameLogger(name_prefix="Main Pipeline")
 
-    # — Assemble pipeline —
+    # The pipeline order is critical for audio output:
+    # input → stt → user context → llm → assistant context → tts → output
     pipeline = Pipeline([
         transport.input(),
         stt,
@@ -225,8 +235,8 @@ async def create_voice_bot(session, room_url, token):
         groq_agg.user(),
         suggestion_consumer,  # inject suggestions here
         groq_llm,
-        groq_agg.assistant(), # Assistant aggregator must come after LLM but before TTS
-        tts,
+        groq_agg.assistant(), 
+        tts,                  # TTS must be after LLM but before output
         transport.output(),
     ])
 
@@ -299,6 +309,11 @@ async def create_voice_bot(session, room_url, token):
                 
         except Exception as e:
             logger.error(f"Error generating idle suggestion: {e}")
+
+    # Add audio output monitoring
+    @transport.event_handler("on_audio_out")
+    async def on_audio_out(trans, audio_data):
+        logger.debug(f"Audio output sent to transport: {len(audio_data)} bytes")
 
     # Run the pipeline
     runner = PipelineRunner()
