@@ -3,7 +3,7 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import requests
 import streamlit as st
@@ -52,6 +52,28 @@ st.markdown("""
     border-left: 4px solid #FF9800;
 }
 
+.suggestion {
+    background-color: #fce4ec;
+    border-radius: 8px;
+    padding: 10px;
+    margin: 10px 0;
+    border-left: 4px solid #E91E63;
+    border-right: 4px solid #E91E63;
+    position: relative;
+}
+
+.suggestion::before {
+    content: "✨ Suggestion";
+    position: absolute;
+    top: -10px;
+    right: 10px;
+    background: #E91E63;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+}
+
 .caption-time {
     font-size: 12px;
     color: #666;
@@ -60,14 +82,6 @@ st.markdown("""
 
 .caption-text {
     font-size: 16px;
-}
-
-.suggestion {
-    background-color: #fce4ec;
-    border-radius: 8px;
-    padding: 10px;
-    margin: 10px 0;
-    border-left: 4px solid #E91E63;
 }
 
 iframe {
@@ -96,6 +110,29 @@ iframe {
     background-color: #ffebee;
     color: #c62828;
 }
+
+.pipeline-status {
+    margin-top: 20px;
+    padding: 10px;
+    border-radius: 8px;
+    background-color: #f5f5f5;
+}
+
+.model-card {
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 15px;
+}
+
+.model-card.groq {
+    background-color: #e3f2fd;
+    border-left: 4px solid #2196F3;
+}
+
+.model-card.gemini {
+    background-color: #e8f5e9;
+    border-left: 4px solid #4CAF50;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -106,6 +143,7 @@ class CaptionManager:
         self.ws = None
         self.call_id = None
         self.connected = False
+        self.suggestion_count = 0
     
     def connect_to_websocket(self, call_id: str):
         """Connect to the WebSocket for captions"""
@@ -125,6 +163,10 @@ class CaptionManager:
             if "ts" not in data:
                 data["ts"] = time.time()
                 
+            # Track suggestion counts
+            if data.get("metadata", {}).get("suggestion", False) or "suggestion" in data.get("class", ""):
+                self.suggestion_count += 1
+                
             # Add to captions
             self.captions.append(data)
             
@@ -141,6 +183,7 @@ class CaptionManager:
             
         def on_open(ws):
             print(f"WebSocket connected for call {call_id}")
+            self.connected = True
             
         # Create WebSocket connection
         ws_endpoint = f"{WS_URL}/ws/captions/{call_id}"
@@ -160,7 +203,23 @@ class CaptionManager:
     
     def format_caption(self, caption: Dict[str, Any]) -> str:
         """Format a caption for display"""
-        speaker_name = "You" if caption.get("speaker") == "user" else caption.get("speaker", "Bot")
+        # Determine speaker name and class
+        if caption.get("speaker") == "user":
+            speaker_name = "You"
+            css_class = "user-caption"
+        elif "gemini" in caption.get("speaker", ""):
+            speaker_name = "Gemini (Smart)"
+            css_class = "gemini-caption"
+        elif "llama" in caption.get("speaker", "") or "groq" in caption.get("speaker", ""):
+            speaker_name = "Llama (Fast)"
+            css_class = "llama-caption"
+        else:
+            speaker_name = caption.get("speaker", "Bot")
+            css_class = "llama-caption"
+        
+        # Override with class if provided
+        if "class" in caption:
+            css_class = caption["class"]
         
         # Format timestamp
         timestamp = caption.get("ts", time.time())
@@ -172,13 +231,8 @@ class CaptionManager:
                 
         time_str = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
         
-        # Determine CSS class
-        css_class = caption.get("class", "user-caption" if speaker_name == "You" else "llama-caption")
-        
         # Format special suggestion
-        is_suggestion = caption.get("metadata", {}).get("suggestion", False)
-        if is_suggestion:
-            css_class = "suggestion"
+        is_suggestion = css_class == "suggestion" or caption.get("metadata", {}).get("suggestion", False)
         
         # Create HTML for the caption
         html = f"""
@@ -271,10 +325,25 @@ def main():
             # Embed Daily iframe
             st.components.v1.iframe(
                 src=daily_url,
-                width=800,
+                width=600,
                 height=400,
                 scrolling=False
             )
+            
+            # Display pipeline architecture info
+            st.markdown("""
+            <div class="pipeline-status">
+                <h4>Pipeline Architecture</h4>
+                <div class="model-card groq">
+                    <strong>Fast Branch: Groq's Llama-3.3-70B</strong>
+                    <p>Provides quick responses with low latency (<150ms)</p>
+                </div>
+                <div class="model-card gemini">
+                    <strong>Smart Branch: Google's Gemini</strong>
+                    <p>Analyzes conversation for deeper insights and periodically injects suggestions</p>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             
             # Show room details
             with st.expander("Room Details"):
@@ -283,13 +352,28 @@ def main():
         with col2:
             st.subheader("Live Transcript")
             
+            # Display statistics
+            suggestion_count = st.session_state.caption_manager.suggestion_count
+            total_captions = len(st.session_state.caption_manager.captions)
+            
+            st.markdown(f"""
+            <div style="margin-bottom: 15px;">
+                <span style="background: #e91e63; color: white; padding: 3px 8px; border-radius: 10px; margin-right: 10px;">
+                    Gemini Suggestions: {suggestion_count}
+                </span>
+                <span style="background: #2196F3; color: white; padding: 3px 8px; border-radius: 10px;">
+                    Total Turns: {total_captions}
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+            
             # Display captions
             captions_container = st.container()
             
             # Auto-update captions
             if st.session_state.update_captions or True:
                 with captions_container:
-                    for caption in reversed(st.session_state.caption_manager.captions[-10:]):
+                    for caption in reversed(st.session_state.caption_manager.captions[-15:]):
                         st.markdown(
                             st.session_state.caption_manager.format_caption(caption), 
                             unsafe_allow_html=True
@@ -312,6 +396,13 @@ def main():
         The smart branch shares suggestions with the fast branch, which incorporates
         them into its responses. This creates a more intelligent conversation experience
         with the speed of the fast model and the intelligence of the slower model.
+        
+        #### Key Features:
+        
+        - **Parallel Processing**: Both models analyze the conversation simultaneously
+        - **Periodic Suggestions**: The smart model injects insights during pauses
+        - **Unified Voice**: The fast model seamlessly incorporates suggestions
+        - **Real-time Captions**: See the entire conversation with turn-by-turn transcripts
         """)
 
 

@@ -25,6 +25,7 @@ caption_queues = {}
 
 
 class CaptionMessage(BaseModel):
+    """Model for caption messages sent to/from the API"""
     call_id: str  
     speaker: str
     text: str
@@ -35,8 +36,14 @@ class CaptionMessage(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Lifecycle manager for the FastAPI app"""
+    # Create HTTP session for the app
     app.state.session = aiohttp.ClientSession()
+    
+    # Yield control
     yield
+    
+    # Cleanup: terminate bot processes
     for pid, (proc, _) in bot_processes.items():
         try:
             proc.terminate()
@@ -44,11 +51,16 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"Error terminating process {pid}: {e}")
     
+    # Close HTTP session
     await app.state.session.close()
 
 
 # Create FastAPI app
-app = FastAPI(title="Smart Voice Bot API", lifespan=lifespan)
+app = FastAPI(
+    title="Smart Voice Bot API", 
+    description="Dual-LLM voice agent with parallel processing pipelines",
+    lifespan=lifespan
+)
 
 # Add CORS middleware
 app.add_middleware(
@@ -59,21 +71,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 async def root():
+    """Root endpoint to check API status"""
     return {"status": "ok", "message": "Smart Voice Bot API is running"}
 
 
 @app.post("/connect")
 async def connect() -> Dict[str, str]:
+    """Create a new Daily room and start the voice bot"""
     try:
-        # Create a new Daily room and token
+        # Create a new Daily room and token with appropriate settings
         room_params = DailyRoomParams(
             enable_chat=True,
             start_audio_off=False,
             start_video_off=True,
         )
         room_url, token = await create_room_with_token(app.state.session, room_params)
+        
+        # Extract call ID from room URL
+        call_id = room_url.split("/")[-1]
         
         # Start the bot process
         cmd = f"python main.py -u {room_url} -t {token}"
@@ -85,29 +103,39 @@ async def connect() -> Dict[str, str]:
         )
         
         # Store process information
-        call_id = room_url.split("/")[-1]
         bot_processes[proc.pid] = (proc, call_id)
         
         # Create caption queue for this call
         caption_queues[call_id] = asyncio.Queue()
         
-        return {"room_url": room_url, "token": token, "call_id": call_id}
+        return {
+            "room_url": room_url, 
+            "token": token, 
+            "call_id": call_id
+        }
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start voice bot: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to start voice bot: {str(e)}"
+        )
 
 
 @app.post("/captions/{call_id}")
 async def add_caption(call_id: str, caption: CaptionMessage):
+    """Add a new caption to the queue for a specific call"""
+    # Create queue if it doesn't exist
     if call_id not in caption_queues:
         caption_queues[call_id] = asyncio.Queue()
     
+    # Add caption to queue
     await caption_queues[call_id].put(caption)
     return {"status": "ok"}
 
 
 @app.websocket("/ws/captions/{call_id}")
 async def captions_websocket(websocket: WebSocket, call_id: str):
+    """WebSocket endpoint for real-time captions"""
     await websocket.accept()
     
     # Create queue if it doesn't exist
@@ -137,6 +165,10 @@ async def captions_websocket(websocket: WebSocket, call_id: str):
             elif "llama" in caption.speaker or "groq" in caption.speaker:
                 caption_data["class"] = "llama-caption"
             
+            # Handle suggestion metadata
+            if caption.metadata and caption.metadata.get("suggestion", False):
+                caption_data["class"] = "suggestion"
+            
             # Send to the client
             await websocket.send_json(caption_data)
     
@@ -144,9 +176,12 @@ async def captions_websocket(websocket: WebSocket, call_id: str):
         print(f"Client disconnected from caption stream for call {call_id}")
     except Exception as e:
         print(f"Error in caption WebSocket for call {call_id}: {e}")
+        # Close the connection on error
+        await websocket.close(code=1011, reason=f"Error: {str(e)}")
 
 
 def main():
+    """Main entry point for the server when run directly"""
     parser = argparse.ArgumentParser(description="Smart Voice Bot Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind")
