@@ -15,13 +15,14 @@ except ImportError:
     logger.warning("pydub not found - audio processing may not work correctly")
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import Frame, TextFrame
+from pipecat.frames.frames import Frame, TextFrame, TTSSpeakFrame, EndFrame, LLMFullResponseEndFrame
 from pipecat.observers.base_observer import BaseObserver
 from pipecat.pipeline.parallel_pipeline import ParallelPipeline
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_response import LLMFullResponseAggregator
 from pipecat.processors.consumer_processor import ConsumerProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.producer_processor import ProducerProcessor
@@ -103,7 +104,11 @@ class GeminiObserver(BaseObserver):
                     
                     # Inject into pipeline if task is set
                     if self.task:
-                        await self.task.queue_frame(suggestion_frame)
+                        # Queue suggestion as TTSSpeakFrame for proper audio synthesis
+                        await task.queue_frames([
+                            TTSSpeakFrame(suggestion_text),
+                            LLMFullResponseEndFrame()  # Only end this response, keep pipeline open
+                        ])
                     
                     # Update suggestion time
                     self.last_suggestion_time = current_time
@@ -138,12 +143,33 @@ class FrameLogger(FrameProcessor):
         await self.push_frame(frame)
 
 
+# 4) TTS Handler to ensure proper frame handling
+class TTSHandler(FrameProcessor):
+    def __init__(self, task):
+        super().__init__(name="tts_handler")
+        self.task = task
+        
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        
+        # For LLM-generated text, ensure proper TTS frames are queued
+        if direction == FrameDirection.DOWNSTREAM and hasattr(frame, "text") and frame.metadata.get("source") == "llm":
+            # Queue a proper TTS frame followed by an end frame
+            await self.task.queue_frames([
+                TTSSpeakFrame(frame.text),
+                LLMFullResponseEndFrame()  # Signal end of LLM response for audio streaming
+            ])
+            
+        await self.push_frame(frame)
+
+
 async def create_voice_bot(session, room_url, token):
     # — Transport, STT, RTVI —
     transport = DailyTransport(
         room_url, token, "Smart Voice Bot",
         DailyParams(
             audio_out_enabled=True,       # Explicit audio output enabled
+            audio_out_is_live=True,       # CRITICAL: Enable live audio streaming
             transcription_enabled=True,   # Explicit transcription enabled  
             vad_enabled=True,
             vad_analyzer=SileroVADAnalyzer(),
@@ -207,6 +233,8 @@ async def create_voice_bot(session, room_url, token):
         voice_id=os.getenv("CARTESIA_VOICE_ID", "71a7ad14-091c-4e8e-a314-022ece01c121"),
         text_filters=[MarkdownTextFilter()],
         streaming=True,  # Enable streaming for better real-time experience
+        sample_rate=24000,  # CRITICAL: Specify sample rate for consistent audio handling
+        text_aggregator=LLMFullResponseAggregator(),  # CRITICAL: Custom flush on response end
     )
 
     # — Suggestion producer/consumer —
@@ -268,7 +296,15 @@ async def create_voice_bot(session, room_url, token):
     @transport.event_handler("on_first_participant_joined")
     async def on_first_participant_joined(trans, participant):
         logger.info(f"First participant joined: {participant}")
-        # Seed Groq context with initial system prompt (already in context creation)
+        
+        # Queue a welcome message with proper TTS frames
+        welcome_message = "Hello! I'm your voice assistant. How can I help you today?"
+        await task.queue_frames([
+            TTSSpeakFrame(welcome_message),
+            LLMFullResponseEndFrame()  # Only end this response, not the whole pipeline
+        ])
+        
+        # After welcome message, seed Groq context
         await task.queue_frame(groq_agg.user().get_context_frame())
         logger.info("Pipeline ready for conversation")
 
@@ -292,7 +328,13 @@ async def create_voice_bot(session, room_url, token):
             if response and response.choices:
                 suggestion_text = response.choices[0].message.content
                 
-                # Create suggestion frame
+                # Queue proper TTS frames for the suggestion
+                await task.queue_frames([
+                    TTSSpeakFrame(suggestion_text),
+                    LLMFullResponseEndFrame()  # Only end this response, keep pipeline open
+                ])
+                
+                # Also inject into Groq's context via producer
                 suggestion_frame = TextFrame(
                     content=suggestion_text,
                     metadata={
@@ -302,18 +344,19 @@ async def create_voice_bot(session, room_url, token):
                         "suggestion_id": "idle-suggestion"
                     }
                 )
-                
-                # Log and inject
-                logger.info(f"Idle suggestion: {suggestion_text}")
                 await suggestion_producer.produce(suggestion_frame)
+                
+                logger.info(f"Idle suggestion: {suggestion_text}")
                 
         except Exception as e:
             logger.error(f"Error generating idle suggestion: {e}")
 
-    # Add audio output monitoring
-    @transport.event_handler("on_audio_out")
-    async def on_audio_out(trans, audio_data):
-        logger.debug(f"Audio output sent to transport: {len(audio_data)} bytes")
+    # Monitor audio frames with proper event handler
+    @task.event_handler("on_frame_reached_downstream")
+    async def on_audio_frame_downstream(task, frame):
+        from pipecat.frames.frames import OutputAudioRawFrame
+        if isinstance(frame, OutputAudioRawFrame):
+            logger.debug(f"Audio frame sent to transport: {len(frame.audio_data)} bytes")
 
     # Run the pipeline
     runner = PipelineRunner()

@@ -87,14 +87,46 @@ async def connect() -> Dict[str, str]:
             enable_chat=True,
             start_audio_off=False,
             start_video_off=True,
+            enable_audio_processing=True,  # Enable audio processing explicitly
         )
         room_url, token = await create_room_with_token(app.state.session, room_params)
         
         # Extract call ID from room URL
         call_id = room_url.split("/")[-1]
         
-        # Start the bot process
+        # Ensure environment variables for TTS are present
+        required_vars = ["CARTESIA_API_KEY", "DEEPGRAM_API_KEY", "GROQ_API_KEY", "GOOGLE_API_KEY"]
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+        
+        # Start the bot process with environment variable check
         cmd = f"python main.py -u {room_url} -t {token}"
+        
+        # Check if pydub is installed
+        try:
+            import pydub
+            print("pydub is installed, continuing with TTS setup")
+        except ImportError:
+            print("WARNING: pydub is not installed. Audio processing may fail.")
+            print("Install with: pip install pydub")
+        
+        # Check if ffmpeg is installed
+        try:
+            ffmpeg_check = subprocess.run(
+                ["ffmpeg", "-version"], 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                text=True
+            )
+            if ffmpeg_check.returncode != 0:
+                print("WARNING: ffmpeg check failed. Audio processing may fail.")
+            else:
+                print("ffmpeg is installed, continuing with TTS setup")
+        except FileNotFoundError:
+            print("WARNING: ffmpeg is not installed. Audio processing may fail.")
+            print("Install with: apt-get install ffmpeg")
         
         proc = subprocess.Popen(
             cmd.split(),
